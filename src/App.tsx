@@ -1,15 +1,25 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "./supabase";
 
 type ProfileRow = {
   id: string;
-  display_name: string;
+  discord_username: string;
+  discord_avatar_url: string;
   updated_at: string;
 };
 
+type DiscordUserMetadata = {
+  preferred_username?: string;
+  full_name?: string;
+  name?: string;
+  user_name?: string;
+
+  avatar_url?: string;
+  picture?: string;
+}
+
 export default function App() {
   const [myUserId, setMyUserId] = useState<string | null>(null);
-  const [myName, setMyName] = useState("");
   const [profiles, setProfiles] = useState<ProfileRow[]>([]);
   const [status, setStatus] = useState<string>("Starting...");
 
@@ -17,9 +27,7 @@ export default function App() {
     setStatus("Redirecting to Discord...");
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "discord",
-      options: {
-        redirectTo: window.location.origin,
-      }
+      options: { redirectTo: window.location.origin },
     });
     if (error) setStatus("Discord sign-in failed: " + error.message);
   }
@@ -29,9 +37,56 @@ export default function App() {
     setStatus("Signed out.");
   }
 
+  async function upsertDiscordProfile() {
+    const { data, error } = await supabase.auth.getSession();
+    if (error) {
+      setStatus("Session error: " + error.message);
+      return;
+    }
+
+    const user = data.session?.user;
+    if (!user) return;
+
+    const md = user.user_metadata as DiscordUserMetadata;
+
+    const discordUsername =
+        md?.preferred_username ??
+        md?.full_name ??
+        md?.name ??
+        md?.user_name ??
+        null;
+
+    const avatarUrl =
+        md?.avatar_url ??
+        md?.picture ??
+        null;
+
+    setStatus("Saving Discord Profile...");
+
+    const { error: upsertErr } = await supabase.from("profiles").upsert({
+          id: user.id,
+          discord_username: discordUsername,
+          discord_avatar_url: avatarUrl,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "id" }
+    );
+
+    if (upsertErr) {
+      setStatus("Profile save failed: " + upsertErr.message);
+      return;
+    }
+
+    setStatus("Connected.");
+  }
+
   useEffect(() => {
     const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
       setMyUserId(session?.user?.id ?? null);
+
+      if (session?.user) {
+        upsertDiscordProfile();
+      }
     });
 
     return () => {
@@ -44,16 +99,21 @@ export default function App() {
 
     async function loadExistingSession() {
       setStatus("Checking session...");
-
       const { data, error } = await supabase.auth.getSession();
       if (error) {
         setStatus("Session error: " + error.message);
         return;
       }
 
-      if (!cancelled) {
-        setMyUserId(data.session?.user?.id ?? null);
-        setStatus(data.session?.user ? "Connected." : "Not signed in.");
+      if (cancelled) return;
+
+      const uid = data.session?.user?.id ?? null;
+      setMyUserId(uid);
+
+      if (uid) {
+        await upsertDiscordProfile();
+      } else {
+        setStatus("Not signed in.");
       }
     }
 
@@ -70,9 +130,9 @@ export default function App() {
     let cancelled = false;
 
     async function loadProfiles() {
-      const {data, error} = await supabase
+      const { data, error } = await supabase
           .from("profiles")
-          .select("id, display_name, updated_at")
+          .select("id, discord_username, discord_avatar_url, updated_at")
           .order("updated_at", {ascending: false});
 
       if (error) {
@@ -80,11 +140,7 @@ export default function App() {
         return;
       }
 
-      if (!cancelled) setProfiles(data ?? []);
-
-      // Also load existing name (if already set)
-      const ownName = (data ?? []).find((p) => p.id === myUserId);
-      if (ownName && !cancelled) setMyName(ownName.display_name);
+      if (!cancelled) setProfiles((data ?? []) as ProfileRow[]);
     }
 
     loadProfiles();
@@ -105,12 +161,11 @@ export default function App() {
             async () => {
               const {data} = await supabase
                   .from("profiles")
-                  .select("id, display_name, updated_at")
+                  .select("id, discord_username, discord_avatar_url, updated_at")
                   .order("updated_at", {ascending: false});
 
-              setProfiles(data ?? []);
-            }
-        )
+              setProfiles((data ?? []) as ProfileRow[]);
+            })
         .subscribe();
 
     return () => {
@@ -118,54 +173,17 @@ export default function App() {
     };
   }, [myUserId]);
 
-  const canSave = useMemo(() => myName.trim().length > 0, [myName]);
-
-  // 4) Save display name
-  async function saveName() {
-
-    const { data: s } = await supabase.auth.getSession();
-    const uid = s.session?.user?.id ?? null;
-
-    if (!uid) {
-      setStatus("Not signed in yet");
-      return;
-    }
-
-    const name = myName.trim();
-    if (!name) return;
-
-    setStatus("Saving name...");
-
-    const {error} = await supabase.from("profiles").upsert({
-          id: uid,
-          display_name: name,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict : "id" }
-    );
-
-    if (error) {
-      setStatus("Save failed: " + error.message);
-      return;
-    }
-
-    setStatus("Saved successfully!");
-  }
-
   // If not signed in, prompt discord
   if (!myUserId) {
     return (
         <div style={{ fontFamily: "system-ui", padding: 16, maxWidth: 700 }}>
           <h1>Soullink Tracker</h1>
-
           <p>
             <strong>Status:</strong> {status}
           </p>
-
           <button onClick={signInWithDiscord} style={{ padding: "8px 12px"}}>
             Sign in with Discord
           </button>
-
         </div>
     );
   }
@@ -184,39 +202,47 @@ export default function App() {
         </button>
 
         <div style={{padding: 12, border: "1px solid #ddd", borderRadius: 8}}>
-          <h2>Your profile</h2>
-          <div style={{fontSize: 12, opacity: 0.8}}>User ID: {myUserId}</div>
-
-          <div style={{marginTop: 8}}>
-            <label>
-              Display name:
-              <input
-                  value={myName}
-                  onChange={(e) => setMyName(e.target.value)}
-                  style={{marginLeft: 8, padding: 6, width: 240}}
-                  placeholder="Name"
-              />
-            </label>
-
-            <button
-                onClick={saveName}
-                disabled={!canSave}
-                style={{marginLeft: 8, padding: "6px 10px"}}
-            >
-              Save
-            </button>
-          </div>
-        </div>
-
-        <div style={{marginTop: 16, padding: 12, border: "1px solid #ddd", borderRadius: 8}}>
-          <h2>Connected players (from Supabase)</h2>
-          <ul>
+          <h2>Players</h2>
+          <ul style={{ listStyle: "none", padding: 0, margin: 0}}>
             {profiles.map((p) => (
-                <li key={p.id}>
-                  <strong>{p.display_name}</strong>{" "}
-                  <span style={{fontSize: 12, opacity: 0.7}}>
-                    ({p.id === myUserId ? "you" : "other"})
-                  </span>
+                <li
+                  key={p.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "8px 0",
+                    borderBottom: "1px solid #eee",
+                }}
+                >
+                  {p.discord_avatar_url ? (
+                      <img
+                        src={p.discord_avatar_url}
+                        alt=""
+                        width={32}
+                        height={32}
+                        style={{ borderRadius: "100%" }}
+                      />
+                  ) : (
+                      <div
+                        style={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: "50%",
+                          backgroundColor: "#ddd",
+                        }}
+                      />
+                  )}
+
+                  <div>
+                    <div style={{ fontWeight: 600 }}>
+                      {p.discord_username ?? "Unknown discord user"}
+                      <span style={{ fontSize: 12, opacity: 0.7, marginLeft: 8}}>
+                        {p.id === myUserId ? "(you)" : ""}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.7 }}>{p.id}</div>
+                  </div>
                 </li>
             ))}
           </ul>
