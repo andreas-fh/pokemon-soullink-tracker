@@ -1,42 +1,44 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "./supabase";
 
-type ProfileRow = {
-  id: string;
-  discord_username: string;
-  discord_avatar_url: string;
-  updated_at: string;
-};
+import type { AttemptRow, EncounterPickRow, EncounterRow, ProfileRow, RoomRow} from "./types";
+import type { GameId } from "./data/games";
+import { upsertDiscordProfile } from "./lib/authProfile";
+import {
+  countRoomMembers,
+  createRoom,
+  joinRoom,
+  leaveRoom,
+  loadRoomByCode,
+  loadRoomMembersProfiles,
+} from "./lib/rooms";
+import { createAttempt, listAttempts} from "./lib/attempts";
+import { addEncounter, loadEncounterPicks, loadEncounters} from "./lib/encounters";
 
-type RunRow = {
-  id: string;
-  code: string;
-  name: string;
-  created_by: string;
-  created_at: string;
-};
-
-type DiscordUserMetadata = {
-  preferred_username?: string;
-  full_name?: string;
-  name?: string;
-  user_name?: string;
-
-  avatar_url?: string;
-  picture?: string;
-}
+import { CenteredPage } from "./components/CenteredPage";
+import { RoomJoinCreate } from "./components/RoomJoinCreate";
+import { PlayersList } from "./components/PlayersList";
+import { AttemptPicker } from "./components/AttemptPicker";
+import { EncountersPanel } from "./components/EncountersPanel";
+import { getGameData } from "./data";
 
 export default function App() {
   const [myUserId, setMyUserId] = useState<string | null>(null);
-  const [profiles, setProfiles] = useState<ProfileRow[]>([]);
   const [status, setStatus] = useState<string>("Starting...");
 
-  // Run state
-  const [runCode, setRunCode] = useState("");
-  const [runName, setRunName] = useState("");
-  const [currentRun, setCurrentRun] = useState<RunRow | null>(null);
+  const [currentRoom, setCurrentRoom] = useState<RoomRow | null>(null);
+  const [profiles, setProfiles] = useState<ProfileRow[]>([]);
 
-  const normalizedRunCode = useMemo(() => runCode.trim().toUpperCase(), [runCode]);
+  const [attempts, setAttempts] = useState<AttemptRow[]>([]);
+  const [activeAttemptId, setActiveAttemptId] = useState<string | null>(null);
+
+  const [encounters, setEncounters] = useState<EncounterRow[]>([]);
+  const [picks, setPicks] = useState<EncounterPickRow[]>([]);
+
+  const activeAttempt = useMemo(
+      () => attempts.find((a) => a.id === activeAttemptId) ?? null,
+      [attempts, activeAttemptId]
+  );
 
   async function signInWithDiscord() {
     setStatus("Redirecting to Discord...");
@@ -49,67 +51,40 @@ export default function App() {
 
   async function signOut() {
     await supabase.auth.signOut();
-    setCurrentRun(null);
+    setCurrentRoom(null);
     setProfiles([]);
+    setAttempts([]);
+    setActiveAttemptId(null);
+    setEncounters([]);
+    setPicks([]);
     setStatus("Signed out.");
   }
 
-  async function upsertDiscordProfile() {
-    const {data, error} = await supabase.auth.getSession();
-    if (error) {
-      setStatus("Session error: " + error.message);
-      return;
-    }
-    const user = data.session?.user;
-    if (!user) return;
-
-    const md = user.user_metadata as DiscordUserMetadata;
-
-    const discordUsername =
-        md?.preferred_username ??
-        md?.full_name ??
-        md?.name ??
-        md?.user_name ??
-        null;
-
-    const avatarUrl =
-        md?.avatar_url ??
-        md?.picture ??
-        null;
-
-    setStatus("Saving Discord Profile...");
-
-    const {error: upsertErr} = await supabase.from("profiles").upsert({
-          id: user.id,
-          discord_username: discordUsername,
-          discord_avatar_url: avatarUrl,
-          updated_at: new Date().toISOString(),
-        },
-        {onConflict: "id"}
-    );
-
-    if (upsertErr) {
-      setStatus("Profile save failed: " + upsertErr.message);
-      return;
-    }
-  }
-
+  // Auth sync
   useEffect(() => {
     const {data: sub} = supabase.auth.onAuthStateChange((_event, session) => {
       setMyUserId(session?.user?.id ?? null);
       if (session?.user) {
-        void upsertDiscordProfile();
-        setStatus("Connected.");
+        void (async () => {
+          const res = await upsertDiscordProfile();
+          if (!res.ok) setStatus("Profile save failed: " + res.message);
+          else setStatus("Connected.");
+        })();
       } else {
         setStatus("Not signed in.");
-        setCurrentRun(null);
+        setCurrentRoom(null);
         setProfiles([]);
+        setAttempts([]);
+        setActiveAttemptId(null);
+        setEncounters([]);
+        setPicks([]);
       }
     });
 
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  // Load session on start
   useEffect(() => {
     let cancelled = false;
 
@@ -126,8 +101,9 @@ export default function App() {
       setMyUserId(uid);
 
       if (uid) {
-        await upsertDiscordProfile();
-        setStatus("Connected.");
+        const res = await upsertDiscordProfile();
+        if (!res.ok) setStatus("Profile save failed: " + res.message);
+        else setStatus("Connected.");
       } else {
         setStatus("Not signed in.");
       }
@@ -139,173 +115,191 @@ export default function App() {
     };
   }, []);
 
-  async function loadRunByCode(code: string): Promise<RunRow | null> {
-    const {data, error} = await supabase
-        .from("runs")
-        .select("id, code, name, created_by, created_at")
-        .eq("code", code)
-        .maybeSingle();
-
-    if (error) {
-      setStatus("Run lookup failed: " + error.message);
-      return null;
+  async function refreshMembers(roomId: string) {
+    try {
+      const profs = await loadRoomMembersProfiles(roomId);
+      setProfiles(profs);
+    } catch (e) {
+      setStatus("Load members failed: " + (e as Error).message);
     }
-    return (data as RunRow) ?? null;
   }
 
-  async function loadRunMembers(runId: string) {
-    const {data: members, error: memErr} = await supabase
-        .from("run_members")
-        .select("user_id")
-        .eq("run_id", runId);
+  async function refreshAttempts(roomId: string) {
+    try {
+      const list = await listAttempts(roomId);
+      setAttempts(list);
 
-    if (memErr) {
-      setStatus("Load members failed: " + memErr.message);
+      // Auto select first attempt if none selected
+      if (!activeAttemptId && list.length > 0) {
+        setActiveAttemptId(list[0]?.id ?? null);
+      }
+
+      // if selected attempt no longer exists
+      if (activeAttemptId && !list.some((a) => a.id === activeAttemptId)) {
+        setActiveAttemptId(list[0]?.id ?? null);
+      }
+    } catch (e) {
+      setStatus("Load attempts failed: " + (e as Error).message);
+    }
+  }
+
+  async function refreshEncounters(attemptId: string) {
+    try {
+      const encs = await loadEncounters(attemptId);
+      setEncounters(encs);
+
+      const ids = encs.map((e) => e.id);
+      const ps = await loadEncounterPicks(ids);
+      setPicks(ps);
+    } catch (e) {
+      setStatus("Load encounters failed: " + (e as Error).message);
+    }
+  }
+
+  async function onCreateRoom(args: { code: string; name: string; game: GameId }) {
+    if (!myUserId) {
+      setStatus("Not signed in.");
+      return;
+    }
+    if (!args.code) {
+      setStatus("Enter a room code (e.g. ABC123)");
       return;
     }
 
-    const ids = (members ?? []).map((m) => m.user_id as string);
-    if (ids.length === 0) {
+    setStatus("Creating room...");
+
+    try {
+      const room = await createRoom({
+        code: args.code,
+        name: args.name.trim() || "My Soullink",
+        game: args.game,
+        created_by: myUserId,
+      });
+
+      setCurrentRoom(room);
+      await joinRoom({roomId: room.id, userId: myUserId});
+      await refreshMembers(room.id);
+      await refreshAttempts(room.id);
+
+      setStatus("Room created.")
+    } catch (e) {
+      setStatus("Create room failed: " + (e as Error).message);
+    }
+  }
+
+  async function onJoinRoom(args: { code: string }) {
+    if (!myUserId) {
+      setStatus("Not signed in.");
+      return;
+    }
+    if (!args.code) {
+      setStatus("Enter a room code!");
+      return;
+    }
+
+    setStatus("Join room...");
+
+    try {
+      const room = await loadRoomByCode(args.code);
+      if (!room) {
+        setStatus(`No room found with code "${args.code}".`);
+        return;
+      }
+
+      const memberCount = await countRoomMembers(args.code);
+      if (memberCount >= 3) {
+        setStatus("This room already has 3 players.");
+        return;
+      }
+
+      setCurrentRoom(room);
+      await joinRoom({roomId: room.id, userId: myUserId});
+      await refreshMembers(room.id);
+      await refreshAttempts(room.id);
+
+      setStatus("Joined room.");
+    } catch (e) {
+      setStatus("Join room failed: " + (e as Error).message);
+    }
+  }
+
+  async function onLeaveRoom() {
+    if (!myUserId || !currentRoom?.id) return;
+
+    setStatus("Leaving room...");
+    try {
+      await leaveRoom({roomId: currentRoom.id, userId: myUserId});
+      setCurrentRoom(null);
       setProfiles([]);
-      return;
+      setAttempts([]);
+      setActiveAttemptId(null);
+      setEncounters([]);
+      setPicks([]);
+      setStatus("Left room.");
+    } catch (e) {
+      setStatus("Leave failed: " + (e as Error).message);
     }
-
-    // load profiles for given ids
-    const {data: profs, error: profErr} = await supabase
-        .from("profiles")
-        .select("id, discord_username, discord_avatar_url, updated_at")
-        .in("id", ids)
-        .order("updated_at", {ascending: false})
-
-    if (profErr) {
-      setStatus("Load profiles failed: " + profErr.message);
-      return;
-    }
-
-    setProfiles((profs ?? []) as ProfileRow[]);
   }
 
-  async function createRun() {
-    if (!myUserId) {
-      setStatus("Not signed in.");
-      return;
+  async function onCreateAttempt(args: { attemptNumber: number }) {
+    if (!myUserId || !currentRoom?.id) return;
+
+    setStatus("Creating attempt...");
+    try {
+      const a = await createAttempt({
+        roomId: currentRoom.id,
+        attemptNumber: args.attemptNumber,
+        name: "",
+        created_by: myUserId,
+      });
+
+      await refreshAttempts(currentRoom.id);
+      setActiveAttemptId(a.id);
+      setStatus("Attempt created.");
+    } catch (e) {
+      setStatus("Create attempt failed: " + (e as Error).message);
     }
-    const code = normalizedRunCode;
-    if (!code) {
-      setStatus("Enter a run code (e.g. ABC123)");
-      return;
-    }
-
-    setStatus("Creating run...");
-
-    const {data: created, error} = await supabase
-        .from("runs")
-        .insert({
-          code,
-          name: runName.trim() || "My Soullink",
-          created_by: myUserId,
-        })
-        .select("id, code, name, created_by, created_at")
-        .single();
-
-    if (error) {
-      setStatus("Create run failed: " + error.message);
-      return;
-    }
-
-    const run = created as RunRow;
-    setCurrentRun(run);
-
-    await joinRunById(run.id);
   }
 
-  async function joinRun() {
-    if (!myUserId) {
-      setStatus("Not signed in.");
-      return;
-    }
-    const code = normalizedRunCode;
-    if (!code) {
-      setStatus("Enter a run code!");
-      return;
-    }
-
-    setStatus("Joining run...");
-    const run = await loadRunByCode(code);
-    if (!run) {
-      setStatus(`No run found with code "${code}".`);
-      return;
-    }
-
-    const {count, error: countErr} = await supabase
-        .from("run_members")
-        .select("*", {count: "exact", head: true})
-        .eq("run_id", run.id);
-
-    if (countErr) {
-      setStatus("Could not check run size: " + countErr.message);
-      return;
-    }
-    if ((count ?? 0) >= 3) {
-      setStatus("This run already has 3 players.");
-      return;
-    }
-
-    setCurrentRun(run);
-    await joinRunById(run.id);
+  async function onSelectAttempt(attemptId: string) {
+    setActiveAttemptId(attemptId);
   }
 
-  async function joinRunById(runId: string) {
-    if (!myUserId) return;
+  async function onAddEncounter(args: {
+    routeId: string;
+    nickname: string;
+    picks: { userId: string; pokemon: string }[];
+  }) {
+    if (!myUserId || !activeAttempt?.id) return;
 
-    const {error} = await supabase.from("run_members").upsert(
-        {
-          run_id: runId,
-          user_id: myUserId,
-        },
-        {onConflict: "run_id, user_id"}
-    );
+    setStatus("Adding encounter...");
+    try {
+      await addEncounter({
+        attemptId: activeAttempt.id,
+        routeId: args.routeId,
+        nickname: args.nickname,
+        created_by: myUserId,
+        picks: args.picks,
+      });
 
-    if (error) {
-      setStatus("Join failed: " + error.message);
-      return;
+      await refreshEncounters(activeAttempt.id);
+      setStatus("Encounter added.");
+    } catch (e) {
+      setStatus("Add encounter failed: " + (e as Error).message);
     }
-
-    await loadRunMembers(runId);
-    setStatus("Joined run.");
   }
 
-  async function leaveRun() {
-    if (!myUserId || !currentRun?.id) return;
-
-    setStatus("Leaving run...");
-
-    const { error } = await supabase
-        .from("run_members")
-        .delete()
-        .eq("run_id", currentRun.id)
-        .eq("user_id", myUserId);
-
-    if (error) {
-      setStatus("Leave failed: " + error.message);
-      return;
-    }
-
-    setCurrentRun(null);
-    setProfiles([]);
-    setStatus("Left run.");
-  }
-
+  // Realtime: room members
   useEffect(() => {
-    if (!currentRun?.id) return;
+    if (!currentRoom?.id) return;
 
     const channel = supabase
-        .channel("run-members-realtime")
+        .channel("room-members-realtime")
         .on(
             "postgres_changes",
-            {event: "*", schema: "public", table: "run_members", filter: `run_id=eq.${currentRun.id}`},
+            {event: "*", schema: "public", table: "room_members", filter: `room_id=eq.${currentRoom.id}`},
             async () => {
-              await loadRunMembers(currentRun.id);
+              await refreshAttempts(currentRoom.id);
             }
         )
         .subscribe();
@@ -313,12 +307,54 @@ export default function App() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [currentRun?.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentRoom?.id]);
+
+  // Realtime: attempts
+  useEffect(() => {
+    if (!currentRoom?.id) return;
+
+    const channel = supabase
+        .channel("attempts-realtime")
+        .on(
+            "postgres_changes",
+            {event: "*", schema: "public", table: "attempts", filter: `room_id=eq.${currentRoom.id}`},
+            async () => {
+              await refreshAttempts(currentRoom.id);
+            }
+        )
+        .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentRoom?.id]);
+
+  // Load encounters when attempt changes
+  useEffect(() => {
+    if (!activeAttemptId) return;
+
+    const channel = supabase
+        .channel("encounters-realtime")
+        .on(
+            "postgres_changes",
+            {event: "*", schema: "public", table: "encounters", filter: `attempt_id=eq.${activeAttemptId}`},
+            async () => {
+              await refreshEncounters(activeAttemptId);
+            }
+        )
+        .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [activeAttemptId]);
 
   // If not signed in, prompt discord
   if (!myUserId) {
     return (
-        <div style={{fontFamily: "system-ui", padding: 16, maxWidth: 700, margin: "0 auto", textAlign: "center"}}>
+        <CenteredPage>
           <h1>Soullink Tracker</h1>
           <p>
             <strong>Status:</strong> {status}
@@ -326,120 +362,70 @@ export default function App() {
           <button onClick={signInWithDiscord} style={{padding: "8px 12px"}}>
             Sign in with Discord
           </button>
-        </div>
+        </CenteredPage>
     );
   }
 
   // UI if signed in
   return (
-      <div style={{fontFamily: "system-ui", padding: 16, maxWidth: 700, margin: "0 auto", textAlign: "center"}}>
+      <CenteredPage>
         <h1>Soullink Tracker</h1>
 
         <p>
           <strong>Status:</strong> {status}
         </p>
 
-        <button onClick={signOut} style={{padding: "6px 10px", marginBottom: 12}}>
-          Sign out
-        </button>
+        <div style={{display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap"}}>
+          <button onClick={signOut} style={{padding: "6px 10px"}}>
+            Sign out
+          </button>
 
-        <button
-            onClick={leaveRun}
-            style={{ padding: "6px 10px", marginBottom: 12, marginLeft: 8 }}
-        >
-          Leave room
-        </button>
+          {currentRoom ? (
+              <button onClick={onLeaveRoom} style={{padding: "6px 10px"}}>
+                Leave room
+              </button>
+          ) : null}
+        </div>
 
-        {!currentRun ? (
-            <div style={{padding: 12, border: "1px solid #ddd", borderRadius: 8}}>
-              <h2>Create or Join Run</h2>
-
-              <div style={{display: "grid", gap: 8, maxWidth: 360}}>
-                <label>
-                  Run code (share with friends):
-                  <input
-                      value={runCode}
-                      onChange={(e) => setRunCode(e.target.value)}
-                      placeholder="ABC123"
-                      style={{display: "block", width: "100%", padding: 8, marginTop: 4}}
-                  />
-                </label>
-
-                <label>
-                  Run name:
-                  <input
-                      value={runName}
-                      onChange={(e) => setRunName(e.target.value)}
-                      placeholder="My Soullink"
-                      style={{display: "block", width: "100%", padding: 8, marginTop: 4}}
-                  />
-                </label>
-
-                <div style={{display: "flex", gap: 8}}>
-                  <button onClick={createRun} style={{padding: "8px 12px"}}>
-                    Create
-                  </button>
-                  <button onClick={joinRun} style={{padding: "8px 12px"}}>
-                    Join
-                  </button>
-                </div>
-
-                <div style={{fontSize: 12, opacity: 0.7}}>
-                  Up to 3 players per run.
-                </div>
-              </div>
-            </div>
+        {!currentRoom ? (
+            <RoomJoinCreate onCreate={onCreateRoom} onJoin={onJoinRoom}/>
         ) : (
             <>
-              <div style={{padding: 12, border: "1px solid #ddd", borderRadius: 8}}>
-                <h2>Current run</h2>
+              <div style={{marginTop: 16, padding: 12, border: "1px solid #ddd", borderRadius: 8}}>
+                <h2>Current room</h2>
                 <div>
-                  <strong>{currentRun.name}</strong> (code: <code>{currentRun.code}</code>)
+                  <strong>{currentRoom.name}</strong> (code: <code>{currentRoom.code}</code>)
+                </div>
+                <div style={{marginTop: 6, fontSize: 12, opacity: 0.75}}>
+                  Game: <strong>{currentRoom.game}</strong>
                 </div>
               </div>
 
-              <div style={{marginTop: 16, padding: 12, border: "1px solid #ddd", borderRadius: 8}}>
-                <h2>Players in this run</h2>
-                <ul style={{listStyle: "none", padding: 0, margin: 0}}>
-                  {profiles.map((p) => (
-                      <li
-                          key={p.id}
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            gap: 10,
-                            padding: "8px 0",
-                            borderBottom: "1px solid #eee",
-                          }}
-                      >
-                        {p.discord_avatar_url ? (
-                            <img
-                                src={p.discord_avatar_url}
-                                alt=""
-                                width={32}
-                                height={32}
-                                style={{borderRadius: "50%"}}
-                            />
-                        ) : (
-                            <div style={{width: 32, height: 32, borderRadius: "50%", background: "#ddd"}}/>
-                        )}
+              <PlayersList profiles={profiles} myUserId={myUserId}/>
 
-                        <div>
-                          <div style={{fontWeight: 600, textAlign: "left"}}>
-                            {p.discord_username ?? "(unknown)"}
-                            {p.id === myUserId ? (
-                                <span style={{marginLeft: 8, fontSize: 12, opacity: 0.7, textAlign: "left"}}>(you)</span>
-                            ) : null}
-                          </div>
-                          <div style={{fontSize: 12, opacity: 0.7, textAlign: "left"}}>{p.id}</div>
-                        </div>
-                      </li>
-                  ))}
-                </ul>
-              </div>
+              <AttemptPicker
+                  attempts={attempts}
+                  activeAttemptId={activeAttemptId}
+                  onSelect={onSelectAttempt}
+                  onCreate={onCreateAttempt}
+              />
+
+              {activeAttempt ? (
+                  <EncountersPanel
+                      gameData={getGameData(currentRoom.game)}
+                      profiles={profiles}
+                      myUserId={myUserId}
+                      encounters={encounters}
+                      picks={picks}
+                      onAddEncounter={onAddEncounter}
+                  />
+              ) : (
+                  <div style={{marginTop: 16, fontSize: 12, opacity: 0.75}}>
+                    Create/select an attempt to start adding encounters.
+                  </div>
+              )}
             </>
         )}
-      </div>
+      </CenteredPage>
   );
 }
