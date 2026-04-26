@@ -13,6 +13,21 @@ export async function loadRoomByCode(code: string): Promise<RoomRow | null> {
     return (data as RoomRow) ?? null;
 }
 
+export async function getOrCreateRoom(params: {
+    code: string;
+    name: string;
+    game: GameId;
+    created_by: string;
+}): Promise<{ room: RoomRow; created: boolean }> {
+    // If it already exists, return it
+    const existing = await loadRoomByCode(params.code);
+    if (existing) return { room: existing, created: false };
+
+    // Otherwise create it
+    const room = await createRoom(params);
+    return { room, created: true };
+}
+
 export async function createRoom(params: {
     code: string;
     name: string;
@@ -51,7 +66,7 @@ export async function leaveRoom(params: { roomId: string; userId: string }): Pro
         .from("room_members")
         .delete()
         .eq("room_id", params.roomId)
-        .eq("userId", params.userId)
+        .eq("user_id", params.userId)
 
     if (error) throw new Error(error.message);
 }

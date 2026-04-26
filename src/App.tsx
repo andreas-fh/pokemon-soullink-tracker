@@ -6,7 +6,7 @@ import type { GameId } from "./data/games";
 import { upsertDiscordProfile } from "./lib/authProfile";
 import {
   countRoomMembers,
-  createRoom,
+  getOrCreateRoom,
   joinRoom,
   leaveRoom,
   loadRoomByCode,
@@ -14,6 +14,7 @@ import {
 } from "./lib/rooms";
 import { createAttempt, listAttempts} from "./lib/attempts";
 import { addEncounter, loadEncounterPicks, loadEncounters} from "./lib/encounters";
+import { getPokemonOptionsUpToGen, type PokemonOption } from "./lib/pokeapi";
 
 import { CenteredPage } from "./components/CenteredPage";
 import { RoomJoinCreate } from "./components/RoomJoinCreate";
@@ -34,6 +35,8 @@ export default function App() {
 
   const [encounters, setEncounters] = useState<EncounterRow[]>([]);
   const [picks, setPicks] = useState<EncounterPickRow[]>([]);
+
+  const [pokemonOptions, setPokemonOptions] = useState<PokemonOption[]>([]);
 
   const activeAttempt = useMemo(
       () => attempts.find((a) => a.id === activeAttemptId) ?? null,
@@ -169,19 +172,25 @@ export default function App() {
     setStatus("Creating room...");
 
     try {
-      const room = await createRoom({
+      const { room, created } = await getOrCreateRoom({
         code: args.code,
         name: args.name.trim() || "My Soullink",
         game: args.game,
         created_by: myUserId,
       });
 
+      const memberCount = await countRoomMembers(room.id);
+      if (memberCount >= 3) {
+        setStatus("This room already has 3 players");
+        return;
+      }
+
       setCurrentRoom(room);
       await joinRoom({roomId: room.id, userId: myUserId});
       await refreshMembers(room.id);
       await refreshAttempts(room.id);
 
-      setStatus("Room created.")
+      setStatus(created ? "Room created." : "Room already exists - joined it.")
     } catch (e) {
       setStatus("Create room failed: " + (e as Error).message);
     }
@@ -197,7 +206,7 @@ export default function App() {
       return;
     }
 
-    setStatus("Join room...");
+    setStatus("Joining room...");
 
     try {
       const room = await loadRoomByCode(args.code);
@@ -351,6 +360,24 @@ export default function App() {
     };
   }, [activeAttemptId]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadPokemon() {
+      try {
+        const options = await getPokemonOptionsUpToGen(5);
+        if (!cancelled) setPokemonOptions(options);
+      } catch (e) {
+        if (!cancelled) setStatus("Failed to load Pokémon list: " + (e as Error).message);
+      }
+    }
+
+    void loadPokemon();
+    return () => {
+      cancelled = true;
+    }
+  }, []);
+
   // If not signed in, prompt discord
   if (!myUserId) {
     return (
@@ -413,6 +440,8 @@ export default function App() {
               {activeAttempt ? (
                   <EncountersPanel
                       gameData={getGameData(currentRoom.game)}
+                      pokemonOptions={pokemonOptions}
+                      requiredPicksCount={profiles.length}
                       profiles={profiles}
                       myUserId={myUserId}
                       encounters={encounters}

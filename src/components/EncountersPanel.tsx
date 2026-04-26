@@ -2,9 +2,12 @@ import { useMemo, useState } from "react";
 import type { GameData } from "../data";
 import { routeLabel } from "../data";
 import type { EncounterPickRow, EncounterRow, ProfileRow } from "../types";
+import type { PokemonOption } from "../lib/pokeapi";
 
 export function EncountersPanel(props: {
     gameData: GameData;
+    pokemonOptions: PokemonOption[];
+    requiredPicksCount: number;
     profiles: ProfileRow[];
     myUserId: string;
     encounters: EncounterRow[];
@@ -39,10 +42,14 @@ export function EncountersPanel(props: {
         return (
             Boolean(routeId) &&
             nickname.trim().length > 0 &&
-            participating.length >= 2 &&
-            participating.length <= 3
+            participating.length === props.requiredPicksCount
         );
-    }, [nickname, participating.length, routeId]);
+    }, [nickname, participating.length, props.requiredPicksCount, routeId]);
+
+    function findPokemon(name: string): PokemonOption | undefined {
+        const n = name.trim().toLowerCase();
+        return props.pokemonOptions.find((p) => p.name.toLowerCase() === n);
+    }
 
     return (
         <div style={{ marginTop: 16, padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
@@ -82,31 +89,45 @@ export function EncountersPanel(props: {
 
                         <div style={{ marginTop: 10 }}>
                             <div style={{ fontWeight: 600, marginBottom: 6 }}>
-                                Pokémon per player
+                                Pokémon per player ({props.requiredPicksCount} / {props.requiredPicksCount})
                             </div>
 
-                            {props.profiles.map((p) => (
-                                <label key={p.id} style={{ display: "block", marginTop: 8}}>
-                                    {p.discord_username ?? "(unknown)"} {p.id === props.myUserId ? "(you)" : ""}:
-                                    <select
-                                        value={pickByUserId[p.id] ?? ""}
-                                        onChange={(e) =>
-                                            setPickByUserId((prev) => ({
-                                            ...prev,
-                                            [p.id]: e.target.value,
-                                            }))
-                                        }
-                                        style={{ display: "block", width: "100%", padding: 8, marginTop: 4 }}
-                                        >
-                                        <option value="">(not participating)</option>
-                                        {props.gameData.pokemon.map((mon) => (
-                                            <option key={mon} value={mon}>
-                                                {mon}
-                                            </option>
-                                        ))}
-                                    </select>
-                                </label>
-                            ))}
+                            {props.profiles.map((p) => {
+                                const selectedName = pickByUserId[p.id] ?? "";
+                                const selected = findPokemon(selectedName);
+
+                                return (
+                                    <label key={p.id} style={{display: "block", marginTop: 8}}>
+                                        {p.discord_username ?? "(unknown)"} {p.id === props.myUserId ? "(you)" : ""}:
+                                        <div style={{display: "flex", gap: 10, alignItems: "center", marginTop: 4}}>
+                                            <input
+                                                value={selectedName}
+                                                onChange={(e) =>
+                                                    setPickByUserId((prev) => ({
+                                                        ...prev,
+                                                        [p.id]: e.target.value,
+                                                    }))
+                                                }
+                                                list="pokemon-options"
+                                                placeholder="Start typing (e.g. Bulbasaur)"
+                                                style={{flex: 1, padding: 8}}
+                                            />
+
+                                            {selected ? (
+                                                <img src={selected.spriteUrl} alt={selected.name} width={72} height={72}/>
+                                            ) : (
+                                                <div style={{width: 72, height: 72}}/>
+                                            )}
+                                        </div>
+                                    </label>
+                                );
+                            })}
+
+                            <datalist id="pokemon-options">
+                                {props.pokemonOptions.map((mon) => (
+                                    <option key={mon.id} value={mon.name} />
+                                ))}
+                            </datalist>
                         </div>
 
                         <button
@@ -133,7 +154,7 @@ export function EncountersPanel(props: {
                         </button>
 
                         <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>
-                            Selected players: {participating.length} / 3
+                            Selected players: {participating.length} / {props.requiredPicksCount}
                         </div>
                     </div>
                 </div>
