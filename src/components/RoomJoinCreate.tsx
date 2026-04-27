@@ -11,17 +11,26 @@ export function RoomJoinCreate(props: {
 
     const normalizedRoomCode = useMemo(() => roomCode.trim().toUpperCase(), [roomCode]);
 
+    const inputStyle: React.CSSProperties = {
+        display: "block",
+        width: "100%",
+        maxWidth: "100%",
+        boxSizing: "border-box",
+        padding: 8,
+        marginTop: 4,
+    };
+
     return (
         <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8}}>
             <h2>Create or Join Room</h2>
 
-            <div style={{ display: "grid", gap: 8, width: "min(420px, 100%)", margin: "0 auto"}}>
-                <label style={{ textAlign: "left" }}>
+            <div style={{ display: "grid", gap: 8, width: "min(420px, 100%)", margin: "0 auto", textAlign: "left"}}>
+                <label>
                     Game:
                     <select
                         value={game}
                         onChange={(e) => setGame(e.target.value as GameId)}
-                        style={{ display: "block", width: "100%", padding: 8,marginTop: 4 }}
+                        style={inputStyle}
                     >
                         {GAMES.map((g) => (
                             <option key={g.id} value={g.id}>
@@ -31,31 +40,31 @@ export function RoomJoinCreate(props: {
                     </select>
                 </label>
 
-                <label style={{ textAlign: "left" }}>
+                <label>
                     Room code (share with friends):
                     <input
                         value={roomCode}
                         onChange={(e) => setRoomCode(e.target.value)}
                         placeholder="ABC123"
-                        style={{ display: "block", width: "100%", padding: 8, marginTop: 4 }}
+                        style={inputStyle}
                         />
                 </label>
 
-                <label style={{ textAlign: "left" }}>
+                <label>
                     Room name
                     <input
                         value={roomName}
                         onChange={(e) => setRoomName(e.target.value)}
                         placeholder="My Soullink"
-                        style={{ display: "block", width: "100%", padding: 8, marginTop: 4 }}
+                        style={inputStyle}
                         />
                 </label>
 
-                <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
                     <button
                         onClick={() => props.onCreate({ code: normalizedRoomCode, name: roomName, game })}
                         style={{ padding: "8px 12px" }}
-                        >
+                    >
                         Create
                     </button>
                     <button
@@ -66,7 +75,9 @@ export function RoomJoinCreate(props: {
                     </button>
                 </div>
 
-                <div style={{ fontSize: 12, opacity: 0.7 }}>Up to 3 players per room.</div>
+                <div style={{ fontSize: 12, opacity: 0.7, textAlign: "center" }}>
+                    Up to 3 players per room.
+                </div>
             </div>
         </div>
     );

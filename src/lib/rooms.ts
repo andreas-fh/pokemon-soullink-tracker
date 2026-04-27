@@ -55,7 +55,7 @@ export async function joinRoom(params: { roomId: string; userId: string}): Promi
             room_id: params.roomId,
             user_id: params.userId,
         },
-        { onConflict: "room_id, user_id" }
+        { onConflict: "room_id,user_id" }
     );
 
     if (error) throw new Error(error.message);

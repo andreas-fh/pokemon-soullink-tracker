@@ -20,8 +20,10 @@ import { getPokemonOptionsUpToGen, type PokemonOption } from "./lib/pokeapi";
 import { CenteredPage } from "./components/CenteredPage";
 import { RoomJoinCreate } from "./components/RoomJoinCreate";
 import { PlayersList } from "./components/PlayersList";
-import { AttemptPicker } from "./components/AttemptPicker";
+import { AttemptPicker, type AttemptSelection } from "./components/AttemptPicker";
 import { EncountersPanel } from "./components/EncountersPanel";
+import { OverallStatisticsPanel } from "./components/OverallStatisticsPanel";
+
 import { getGameData } from "./data";
 
 export default function App() {
@@ -35,17 +37,20 @@ export default function App() {
   const [profiles, setProfiles] = useState<ProfileRow[]>([]);
 
   const [attempts, setAttempts] = useState<AttemptRow[]>([]);
-  const [activeAttemptId, setActiveAttemptId] = useState<string | null>(null);
+  const [attemptSelection, setAttemptSelection] = useState<AttemptSelection>({ type: "overall" });
 
-  const [encounters, setEncounters] = useState<EncounterRow[]>([]);
-  const [picks, setPicks] = useState<EncounterPickRow[]>([]);
-
-  const [pokemonOptions, setPokemonOptions] = useState<PokemonOption[]>([]);
+  const activeAttemptId =
+      attemptSelection.type === "attempt" ? attemptSelection.attemptId : null;
 
   const activeAttempt = useMemo(
       () => attempts.find((a) => a.id === activeAttemptId) ?? null,
       [attempts, activeAttemptId]
   );
+
+  const [encounters, setEncounters] = useState<EncounterRow[]>([]);
+  const [picks, setPicks] = useState<EncounterPickRow[]>([]);
+
+  const [pokemonOptions, setPokemonOptions] = useState<PokemonOption[]>([]);
 
   async function signInWithDiscord() {
     setStatus("Redirecting to Discord...");
@@ -61,7 +66,7 @@ export default function App() {
     setCurrentRoom(null);
     setProfiles([]);
     setAttempts([]);
-    setActiveAttemptId(null);
+    setAttemptSelection({ type: "overall" });
     setEncounters([]);
     setPicks([]);
     setStatus("Signed out.");
@@ -82,7 +87,7 @@ export default function App() {
         setCurrentRoom(null);
         setProfiles([]);
         setAttempts([]);
-        setActiveAttemptId(null);
+        setAttemptSelection({ type: "overall" });
         setEncounters([]);
         setPicks([]);
       }
@@ -140,31 +145,32 @@ export default function App() {
       const savedAttemptId = localStorage.getItem(storageKey);
 
       // If there are no attempts, auto-create Attempt 1
-      if (list.length === 0 && myUserId) {
+      const uid = myUserId
+      if (list.length === 0 && uid) {
         const nextNum = (await getMaxAttemptNumber(roomId)) + 1;
         const created = await createAttempt({
           roomId,
           attemptNumber: nextNum,
           name: "",
-          created_by: myUserId,
+          created_by: uid,
         });
 
         const nextList = await listAttempts(roomId);
         setAttempts(nextList);
-        setActiveAttemptId(created.id);
+        setAttemptSelection({ type: "attempt", attemptId: created.id });
         localStorage.setItem(storageKey, created.id);
         return;
       }
 
       // If we have attempts, load
       if (savedAttemptId && list.some((a) => a.id === savedAttemptId)) {
-        setActiveAttemptId(savedAttemptId);
+        setAttemptSelection({ type: "attempt", attemptId: savedAttemptId });
         return;
       }
 
       // Otherwise default to first attempts
       const first = list[0]?.id ?? null;
-      setActiveAttemptId(first);
+      setAttemptSelection(first ? { type: "attempt", attemptId: first } : { type: "overall" });
       if (first) localStorage.setItem(storageKey, first);
     } catch (e) {
       setStatus("Load attempts failed: " + (e as Error).message);
@@ -281,31 +287,40 @@ export default function App() {
     }
   }
 
-  async function onCreateAttempt(args: { attemptNumber: number }) {
-    if (!myUserId || !currentRoom?.id) return;
+  async function onCreateNewAttempt() {
+    const uid = myUserId;
+    if (!uid ||!currentRoom?.id) return;
 
     setStatus("Creating attempt...");
     try {
+      const maxNum = attempts.reduce((m, a) => Math.max(m, a.attempt_number), 0);
+      const nextNum = maxNum + 1;
+
       const a = await createAttempt({
         roomId: currentRoom.id,
-        attemptNumber: args.attemptNumber,
+        attemptNumber: nextNum,
         name: "",
-        created_by: myUserId,
+        created_by: uid,
       });
 
       await refreshAttempts(currentRoom.id);
-      setActiveAttemptId(a.id);
-      setStatus("Attempt created.");
+      setAttemptSelection({ type: "attempt", attemptId: a.id })
+
+      const storageKey = `${ATTEMPT_STORAGE_KEY_PREFIX}${currentRoom.id}.v1`;
+      localStorage.setItem(storageKey, a.id);
+
+      setStatus(`Attempt ${nextNum} created.`);
     } catch (e) {
       setStatus("Create attempt failed: " + (e as Error).message);
     }
   }
 
-  async function onSelectAttempt(attemptId: string) {
-    setActiveAttemptId(attemptId);
-    if (currentRoom?.id) {
+  async function onSelectAttempt(selection: AttemptSelection) {
+    setAttemptSelection(selection);
+
+    if (selection.type === "attempt" && currentRoom?.id) {
       const storageKey = `${ATTEMPT_STORAGE_KEY_PREFIX}${currentRoom.id}.v1`;
-      localStorage.setItem(storageKey, attemptId);
+      localStorage.setItem(storageKey, selection.attemptId);
     }
   }
 
@@ -457,7 +472,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [myUserId, currentRoom]);
+  }, [myUserId, currentRoom, refreshAttempts]);
 
   useEffect(() => {
     if (!activeAttemptId) return;
@@ -519,12 +534,14 @@ export default function App() {
 
               <AttemptPicker
                   attempts={attempts}
-                  activeAttemptId={activeAttemptId}
+                  selection={attemptSelection}
                   onSelect={onSelectAttempt}
-                  onCreate={onCreateAttempt}
+                  onCreateNew={onCreateNewAttempt}
               />
 
-              {activeAttempt ? (
+              {attemptSelection.type === "overall" ? (
+                  <OverallStatisticsPanel />
+              ) : activeAttempt ? (
                   <EncountersPanel
                       gameData={getGameData(currentRoom.game)}
                       pokemonOptions={pokemonOptions}
