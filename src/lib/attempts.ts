@@ -32,3 +32,16 @@ export async function createAttempt(params: {
     if (error) throw new Error(error.message);
     return data as AttemptRow;
 }
+
+export async function getMaxAttemptNumber(roomId: string): Promise<number> {
+    const { data, error } = await supabase
+        .from("attempts")
+        .select("attempt_number")
+        .eq("room_id", roomId)
+        .order("attempt_number", { ascending: false })
+        .limit(1);
+
+    if (error) throw new Error(error.message);
+    const row = (data ?? [])[0] as { attempt_number: number } | undefined;
+    return row?.attempt_number ?? 0;
+}

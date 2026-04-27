@@ -15,7 +15,7 @@ export function RoomJoinCreate(props: {
         <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8}}>
             <h2>Create or Join Room</h2>
 
-            <div style={{ display: "grid", gap: 8, maxWidth: 360, margin: "0 auto"}}>
+            <div style={{ display: "grid", gap: 8, width: "min(420px, 100%)", margin: "0 auto"}}>
                 <label style={{ textAlign: "left" }}>
                     Game:
                     <select
@@ -25,7 +25,7 @@ export function RoomJoinCreate(props: {
                     >
                         {GAMES.map((g) => (
                             <option key={g.id} value={g.id}>
-                                {g.id}
+                                {g.label}
                             </option>
                         ))}
                     </select>

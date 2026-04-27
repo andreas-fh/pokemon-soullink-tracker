@@ -15,7 +15,7 @@ export function AttemptPicker(props: {
         <div style={{ marginTop: 16, padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
             <h2>Attempts</h2>
 
-            <div style={{ maxWidth: 520, margin: "0 auto", textAlign: "left"}}>
+            <div style={{ maxWidth: "min(520px, 100%)", margin: "0 auto", textAlign: "left"}}>
                 <label>
                     Active attempt:
                     <select

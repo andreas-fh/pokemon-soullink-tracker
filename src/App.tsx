@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "./supabase";
+import { GAMES } from "./data/games";
 
 import type { AttemptRow, EncounterPickRow, EncounterRow, ProfileRow, RoomRow} from "./types";
 import type { GameId } from "./data/games";
@@ -12,7 +13,7 @@ import {
   loadRoomByCode,
   loadRoomMembersProfiles,
 } from "./lib/rooms";
-import { createAttempt, listAttempts} from "./lib/attempts";
+import { createAttempt, listAttempts, getMaxAttemptNumber } from "./lib/attempts";
 import { addEncounter, loadEncounterPicks, loadEncounters} from "./lib/encounters";
 import { getPokemonOptionsUpToGen, type PokemonOption } from "./lib/pokeapi";
 
@@ -24,6 +25,9 @@ import { EncountersPanel } from "./components/EncountersPanel";
 import { getGameData } from "./data";
 
 export default function App() {
+  const ROOM_CODE_STORAGE_KEY = "soullink.currentRoomCode.v1";
+  const ATTEMPT_STORAGE_KEY_PREFIX = "soullink.activeAttemptId.room.";
+
   const [myUserId, setMyUserId] = useState<string | null>(null);
   const [status, setStatus] = useState<string>("Starting...");
 
@@ -132,15 +136,36 @@ export default function App() {
       const list = await listAttempts(roomId);
       setAttempts(list);
 
-      // Auto select first attempt if none selected
-      if (!activeAttemptId && list.length > 0) {
-        setActiveAttemptId(list[0]?.id ?? null);
+      const storageKey = `${ATTEMPT_STORAGE_KEY_PREFIX}${roomId}.v1`;
+      const savedAttemptId = localStorage.getItem(storageKey);
+
+      // If there are no attempts, auto-create Attempt 1
+      if (list.length === 0 && myUserId) {
+        const nextNum = (await getMaxAttemptNumber(roomId)) + 1;
+        const created = await createAttempt({
+          roomId,
+          attemptNumber: nextNum,
+          name: "",
+          created_by: myUserId,
+        });
+
+        const nextList = await listAttempts(roomId);
+        setAttempts(nextList);
+        setActiveAttemptId(created.id);
+        localStorage.setItem(storageKey, created.id);
+        return;
       }
 
-      // if selected attempt no longer exists
-      if (activeAttemptId && !list.some((a) => a.id === activeAttemptId)) {
-        setActiveAttemptId(list[0]?.id ?? null);
+      // If we have attempts, load
+      if (savedAttemptId && list.some((a) => a.id === savedAttemptId)) {
+        setActiveAttemptId(savedAttemptId);
+        return;
       }
+
+      // Otherwise default to first attempts
+      const first = list[0]?.id ?? null;
+      setActiveAttemptId(first);
+      if (first) localStorage.setItem(storageKey, first);
     } catch (e) {
       setStatus("Load attempts failed: " + (e as Error).message);
     }
@@ -186,6 +211,8 @@ export default function App() {
       }
 
       setCurrentRoom(room);
+      localStorage.setItem(ROOM_CODE_STORAGE_KEY, room.code);
+
       await joinRoom({roomId: room.id, userId: myUserId});
       await refreshMembers(room.id);
       await refreshAttempts(room.id);
@@ -215,13 +242,15 @@ export default function App() {
         return;
       }
 
-      const memberCount = await countRoomMembers(args.code);
+      const memberCount = await countRoomMembers(room.id);
       if (memberCount >= 3) {
         setStatus("This room already has 3 players.");
         return;
       }
 
       setCurrentRoom(room);
+      localStorage.setItem(ROOM_CODE_STORAGE_KEY, room.code);
+
       await joinRoom({roomId: room.id, userId: myUserId});
       await refreshMembers(room.id);
       await refreshAttempts(room.id);
@@ -238,12 +267,14 @@ export default function App() {
     setStatus("Leaving room...");
     try {
       await leaveRoom({roomId: currentRoom.id, userId: myUserId});
+
+      localStorage.removeItem(ROOM_CODE_STORAGE_KEY);
+
       setCurrentRoom(null);
       setProfiles([]);
-      setAttempts([]);
-      setActiveAttemptId(null);
       setEncounters([]);
       setPicks([]);
+
       setStatus("Left room.");
     } catch (e) {
       setStatus("Leave failed: " + (e as Error).message);
@@ -272,6 +303,10 @@ export default function App() {
 
   async function onSelectAttempt(attemptId: string) {
     setActiveAttemptId(attemptId);
+    if (currentRoom?.id) {
+      const storageKey = `${ATTEMPT_STORAGE_KEY_PREFIX}${currentRoom.id}.v1`;
+      localStorage.setItem(storageKey, attemptId);
+    }
   }
 
   async function onAddEncounter(args: {
@@ -298,6 +333,10 @@ export default function App() {
     }
   }
 
+  function gameLabel(gameId: string): string {
+    return GAMES.find((g) => g.id === gameId)?.label ?? gameId;
+  }
+
   // Realtime: room members
   useEffect(() => {
     if (!currentRoom?.id) return;
@@ -308,7 +347,7 @@ export default function App() {
             "postgres_changes",
             {event: "*", schema: "public", table: "room_members", filter: `room_id=eq.${currentRoom.id}`},
             async () => {
-              await refreshAttempts(currentRoom.id);
+              await refreshMembers(currentRoom.id);
             }
         )
         .subscribe();
@@ -316,7 +355,6 @@ export default function App() {
     return () => {
       supabase.removeChannel(channel);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentRoom?.id]);
 
   // Realtime: attempts
@@ -378,6 +416,55 @@ export default function App() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!myUserId) return;
+
+    let cancelled = false;
+
+    async function autoJoinLastRoom() {
+      const lastCode = localStorage.getItem(ROOM_CODE_STORAGE_KEY);
+      if (!lastCode) return;
+      if (currentRoom) return;
+
+      const uid = myUserId;
+      if (!uid) return;
+
+      try {
+        const room = await loadRoomByCode(lastCode);
+        if (!room) {
+          localStorage.removeItem(ROOM_CODE_STORAGE_KEY);
+          return;
+        }
+
+        const memberCount = await countRoomMembers(room.id);
+        if (memberCount >= 3) return;
+
+        if (cancelled) return;
+
+        setCurrentRoom(room);
+        await joinRoom({ roomId: room.id, userId: uid });
+        await refreshMembers(room.id);
+        await refreshAttempts(room.id);
+
+        setStatus("Rejoined room.");
+      } catch (e) {
+        setStatus("Auto-join failed: " + (e as Error).message);
+      }
+    }
+
+    void autoJoinLastRoom();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [myUserId, currentRoom]);
+
+  useEffect(() => {
+    if (!activeAttemptId) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void refreshEncounters(activeAttemptId);
+  }, [activeAttemptId]);
+
   // If not signed in, prompt discord
   if (!myUserId) {
     return (
@@ -424,7 +511,7 @@ export default function App() {
                   <strong>{currentRoom.name}</strong> (code: <code>{currentRoom.code}</code>)
                 </div>
                 <div style={{marginTop: 6, fontSize: 12, opacity: 0.75}}>
-                  Game: <strong>{currentRoom.game}</strong>
+                  Game: <strong>{gameLabel(currentRoom.game)}</strong>
                 </div>
               </div>
 
